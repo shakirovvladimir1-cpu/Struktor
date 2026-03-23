@@ -28,14 +28,73 @@ def iter_paragraphs(doc: Document):
                 yield Paragraph(p_elem, doc)
 
 
+def split_para_by_linebreaks(para: Paragraph) -> list[str]:
+    """Split paragraph text by <w:br/> line breaks, return non-empty chunks."""
+    chunks = []
+    current = []
+    for elem in para._element.iter():
+        tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
+        if tag == "t" and elem.text:
+            current.append(elem.text)
+        elif tag == "br":
+            text = "".join(current).strip()
+            if text:
+                chunks.append(text)
+            current = []
+    text = "".join(current).strip()
+    if text:
+        chunks.append(text)
+    return chunks if chunks else ([para.text.strip()] if para.text.strip() else [])
+
+
+CHUNK_SIZE = 5000  # max chars per virtual chunk when splitting giant paragraphs
+
+
+def split_text_into_chunks(text: str, max_chars: int = CHUNK_SIZE) -> list[str]:
+    """Split a large text into chunks of up to max_chars, breaking at sentence/comma boundaries."""
+    if len(text) <= max_chars:
+        return [text]
+    chunks = []
+    while text:
+        if len(text) <= max_chars:
+            chunks.append(text)
+            break
+        # Find best break point (comma, period, semicolon) near max_chars
+        candidate = text[:max_chars]
+        for sep in (",", ";", ".", " "):
+            idx = candidate.rfind(sep)
+            if idx > max_chars // 2:
+                candidate = text[:idx + 1]
+                break
+        chunks.append(candidate.strip())
+        text = text[len(candidate):].strip()
+    return [c for c in chunks if c]
+
+
 def collect_paragraphs(doc: Document) -> list[dict]:
-    """Return list of {id, para, text} for all non-empty paragraphs."""
-    result = []
-    for idx, para in enumerate(iter_paragraphs(doc)):
+    """Return list of {id, para, text} for all non-empty paragraphs.
+    Giant single-paragraph documents are split into logical chunks."""
+    raw = []
+    for para in iter_paragraphs(doc):
         text = para.text.strip()
-        if text:
-            result.append({"id": idx, "para": para, "text": text})
-    return result
+        if not text:
+            continue
+        if len(text) > CHUNK_SIZE:
+            # Try line-break split first
+            lines = split_para_by_linebreaks(para)
+            if len(lines) > 1:
+                for line in lines:
+                    raw.append({"para": para, "text": line, "virtual": True})
+                continue
+            # Fall back to character-based chunking
+            chunks = split_text_into_chunks(text)
+            if len(chunks) > 1:
+                for chunk in chunks:
+                    raw.append({"para": para, "text": chunk, "virtual": True})
+                continue
+        raw.append({"para": para, "text": text, "virtual": False})
+
+    return [{"id": i, **r} for i, r in enumerate(raw)]
 
 
 def set_para_text(para: Paragraph, new_text: str):
@@ -70,15 +129,41 @@ def insert_paragraphs_before(para: Paragraph, texts: list[str]):
         # which pushes the previous inserts further back — maintaining order.
 
 
+def fix_json_escapes(text: str) -> str:
+    """Fix invalid backslash escapes inside JSON string values."""
+    # Valid JSON escape chars: " \ / b f n r t u
+    valid = set('"\\\/bfnrtu')
+    result = []
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch == '\\' and i + 1 < len(text):
+            next_ch = text[i + 1]
+            if next_ch in valid:
+                result.append(ch)
+                result.append(next_ch)
+                i += 2
+            else:
+                # Invalid escape — double the backslash
+                result.append('\\\\')
+                i += 1
+        else:
+            result.append(ch)
+            i += 1
+    return "".join(result)
+
+
 def parse_gemini_response(raw: str) -> list[dict]:
     """Extract JSON array from Gemini response, stripping markdown fences."""
     text = raw.strip()
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
     text = text.strip()
-    # Fix invalid backslash escapes that Gemini sometimes produces
-    text = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', text)
-    return json.loads(text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        text = fix_json_escapes(text)
+        return json.loads(text)
 
 
 def call_gemini(client: genai.Client, batch: list[dict]) -> dict[int, list[str]]:
@@ -92,6 +177,9 @@ def call_gemini(client: genai.Client, batch: list[dict]) -> dict[int, list[str]]
     response = client.models.generate_content(
         model=GEMINI_MODEL,
         contents=prompt,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+        ),
     )
     cleaned = parse_gemini_response(response.text)
 
@@ -155,7 +243,21 @@ def process_docx(input_path: str, output_path: str, gemini_api_key: str):
 
     flush_batch(batch)
 
-    # Apply changes: replace text and insert new paragraphs where needed
+    has_virtual = any(p.get("virtual") for p in paragraphs)
+
+    if has_virtual:
+        # Document uses line-breaks instead of paragraphs — build new doc from scratch
+        out_doc = Document()
+        # Copy core properties (margins etc) from original if possible
+        for p in paragraphs:
+            lines = cleaned_map.get(p["id"], [p["text"]])
+            for line in lines:
+                out_doc.add_paragraph(line)
+        out_doc.save(output_path)
+        logger.info(f"Virtual-paragraph doc: wrote {len(paragraphs)} lines as real paragraphs")
+        return
+
+    # Normal doc: Apply changes in-place
     changed = 0
     inserted = 0
     for p in paragraphs:
@@ -164,19 +266,15 @@ def process_docx(input_path: str, output_path: str, gemini_api_key: str):
             continue
 
         if len(new_paragraphs) == 1:
-            # Simple text replacement
             new_text = new_paragraphs[0]
             if new_text != p["text"]:
                 set_para_text(p["para"], new_text)
                 changed += 1
         else:
-            # Multiple paragraphs: insert headers before the original, then update original
-            headers = new_paragraphs[:-1]   # first N-1 lines are headers
-            spec_text = new_paragraphs[-1]  # last line is the cleaned spec
-
+            headers = new_paragraphs[:-1]
+            spec_text = new_paragraphs[-1]
             insert_paragraphs_before(p["para"], headers)
             set_para_text(p["para"], spec_text)
-
             inserted += len(headers)
             changed += 1
 
