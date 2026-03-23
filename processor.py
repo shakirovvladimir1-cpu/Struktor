@@ -14,7 +14,8 @@ from prompts import SYSTEM_PROMPT
 logger = logging.getLogger(__name__)
 
 GEMINI_MODEL = "gemini-2.5-flash"
-BATCH_SIZE = 80  # paragraphs per Gemini call
+BATCH_SIZE = 20   # paragraphs per Gemini call
+MAX_CHARS_PER_BATCH = 12000  # max total text chars per Gemini call
 
 
 def iter_paragraphs(doc: Document):
@@ -74,7 +75,10 @@ def parse_gemini_response(raw: str) -> list[dict]:
     text = raw.strip()
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
-    return json.loads(text.strip())
+    text = text.strip()
+    # Fix invalid backslash escapes that Gemini sometimes produces
+    text = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', text)
+    return json.loads(text)
 
 
 def call_gemini(client: genai.Client, batch: list[dict]) -> dict[int, list[str]]:
@@ -119,15 +123,37 @@ def process_docx(input_path: str, output_path: str, gemini_api_key: str):
 
     logger.info(f"Total paragraphs to process: {len(paragraphs)}")
 
-    # Process in batches
+    # Process in batches, respecting both paragraph count and char limits
     cleaned_map: dict[int, list[str]] = {}
-    for i in range(0, len(paragraphs), BATCH_SIZE):
-        batch = paragraphs[i: i + BATCH_SIZE]
-        batch_result = call_gemini(client, batch)
-        cleaned_map.update(batch_result)
-        logger.info(
-            f"Batch {i // BATCH_SIZE + 1}/{(len(paragraphs) - 1) // BATCH_SIZE + 1} done"
-        )
+    batch: list[dict] = []
+    batch_chars = 0
+    batch_num = 0
+
+    def flush_batch(b):
+        nonlocal batch_num
+        if not b:
+            return
+        batch_num += 1
+        result = call_gemini(client, b)
+        cleaned_map.update(result)
+        logger.info(f"Batch {batch_num} done ({len(b)} paragraphs)")
+
+    for p in paragraphs:
+        p_len = len(p["text"])
+        # If single paragraph exceeds limit — send it alone
+        if p_len > MAX_CHARS_PER_BATCH:
+            flush_batch(batch)
+            batch, batch_chars = [], 0
+            flush_batch([p])
+            continue
+        # If adding this paragraph would exceed limits — flush first
+        if batch and (len(batch) >= BATCH_SIZE or batch_chars + p_len > MAX_CHARS_PER_BATCH):
+            flush_batch(batch)
+            batch, batch_chars = [], 0
+        batch.append(p)
+        batch_chars += p_len
+
+    flush_batch(batch)
 
     # Apply changes: replace text and insert new paragraphs where needed
     changed = 0
