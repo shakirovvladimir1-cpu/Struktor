@@ -80,6 +80,8 @@ def collect_paragraphs(doc: Document) -> list[dict]:
         text = para.text.strip()
         if not text:
             continue
+        # Pre-process ranges before chunking so splits don't break "не менее X, но не более Y"
+        text = preprocess_ranges(text)
         if len(text) > CHUNK_SIZE:
             # Try line-break split first
             lines = split_para_by_linebreaks(para)
@@ -149,6 +151,44 @@ def insert_paragraphs_before(para: Paragraph, texts: list[str], doc: Document):
         else:
             new_p = make_paragraph_element(text)
             ref_elem.addprevious(new_p)
+
+
+def preprocess_ranges(text: str) -> str:
+    """Replace numeric ranges with [[RED:median]] before sending to Gemini."""
+    # Pattern: "не менее X[unit], но не более Y[unit]" or "не менее X[unit] и не более Y[unit]"
+    def replace_range(m):
+        x_str = m.group(1).replace(',', '.')
+        y_str = m.group(3).replace(',', '.')
+        unit = m.group(4) or ''
+        try:
+            x, y = float(x_str), float(y_str)
+            median = round((x + y) / 2)
+            return f'[[RED:{median}]]{unit}'
+        except ValueError:
+            return m.group(0)
+
+    # "не менее X[unit], но не более Y[unit]"
+    text = re.sub(
+        r'не\s+менее\s+([\d,\.]+)\s*([^,]{0,10}?),?\s+(?:но\s+)?не\s+более\s+([\d,\.]+)\s*([^\s,;\.]{0,10})',
+        replace_range, text, flags=re.IGNORECASE
+    )
+    # "от X до Y[unit]"
+    def replace_from_to(m):
+        x_str = m.group(1).replace(',', '.')
+        y_str = m.group(2).replace(',', '.')
+        unit = m.group(3) or ''
+        try:
+            x, y = float(x_str), float(y_str)
+            median = round((x + y) / 2)
+            return f'[[RED:{median}]]{unit}'
+        except ValueError:
+            return m.group(0)
+
+    text = re.sub(
+        r'от\s+([\d,\.]+)\s*[^\d\s,;]{0,10}\s+до\s+([\d,\.]+)\s*([^\s,;\.]{0,10})',
+        replace_from_to, text, flags=re.IGNORECASE
+    )
+    return text
 
 
 def fix_json_escapes(text: str) -> str:
