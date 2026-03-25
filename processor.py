@@ -14,7 +14,7 @@ from prompts import SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
-GEMINI_MODEL = "gemini-2.0-flash"
+GEMINI_MODEL = "gemini-2.5-flash-lite"
 BATCH_SIZE = 20   # paragraphs per Gemini call
 MAX_CHARS_PER_BATCH = 20000  # max total text chars per Gemini call
 
@@ -181,6 +181,8 @@ def parse_gemini_response(raw: str) -> list[dict]:
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
     text = text.strip()
+    # Fix trailing commas before ] or } (not valid JSON but Gemini sometimes adds them)
+    text = re.sub(r",\s*([\]\}])", r"\1", text)
     try:
         return json.loads(text)
     except json.JSONDecodeError:
