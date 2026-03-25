@@ -6,6 +6,7 @@ from docx import Document
 from docx.text.paragraph import Paragraph
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
+from docx.shared import RGBColor
 from google import genai
 from google.genai import types
 
@@ -13,9 +14,9 @@ from prompts import SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-2.0-flash"
 BATCH_SIZE = 20   # paragraphs per Gemini call
-MAX_CHARS_PER_BATCH = 12000  # max total text chars per Gemini call
+MAX_CHARS_PER_BATCH = 20000  # max total text chars per Gemini call
 
 
 def iter_paragraphs(doc: Document):
@@ -97,19 +98,29 @@ def collect_paragraphs(doc: Document) -> list[dict]:
     return [{"id": i, **r} for i, r in enumerate(raw)]
 
 
-def set_para_text(para: Paragraph, new_text: str):
-    """Replace paragraph text while preserving paragraph-level style."""
-    runs = para.runs
-    if not runs:
-        para.add_run(new_text)
-        return
-    runs[0].text = new_text
-    for run in runs[1:]:
-        run.text = ""
+RED_MARKER = re.compile(r'\[\[RED:(.*?)\]\]')
+RED_COLOR = RGBColor(0xFF, 0x00, 0x00)
+
+
+def apply_text_to_para(para: Paragraph, new_text: str):
+    """Replace paragraph text. Handles [[RED:...]] markers for red coloring."""
+    # Clear all existing runs
+    p_elem = para._element
+    for r in p_elem.findall(qn("w:r")):
+        p_elem.remove(r)
+
+    parts = RED_MARKER.split(new_text)
+    # split result: [normal, red, normal, red, ...] — odd indices are red
+    for i, part in enumerate(parts):
+        if not part:
+            continue
+        run = para.add_run(part)
+        if i % 2 == 1:
+            run.font.color.rgb = RED_COLOR
 
 
 def make_paragraph_element(text: str):
-    """Create a minimal w:p XML element with given text."""
+    """Create a minimal w:p XML element with given text (no RED marker support)."""
     new_p = OxmlElement("w:p")
     new_r = OxmlElement("w:r")
     new_t = OxmlElement("w:t")
@@ -119,14 +130,25 @@ def make_paragraph_element(text: str):
     return new_p
 
 
-def insert_paragraphs_before(para: Paragraph, texts: list[str]):
+def make_paragraph_with_markers(doc: Document, text: str) -> Paragraph:
+    """Create a new Paragraph object supporting [[RED:...]] markers."""
+    para = doc.add_paragraph()
+    # Remove the paragraph from doc body — caller will insert it elsewhere
+    doc.element.body.remove(para._element)
+    apply_text_to_para(para, text)
+    return para
+
+
+def insert_paragraphs_before(para: Paragraph, texts: list[str], doc: Document):
     """Insert multiple paragraphs immediately before `para`, in order."""
     ref_elem = para._element
     for text in texts:
-        new_p = make_paragraph_element(text)
-        ref_elem.addprevious(new_p)
-        # Each subsequent insert also goes right before the original para,
-        # which pushes the previous inserts further back — maintaining order.
+        if RED_MARKER.search(text):
+            new_para = make_paragraph_with_markers(doc, text)
+            ref_elem.addprevious(new_para._element)
+        else:
+            new_p = make_paragraph_element(text)
+            ref_elem.addprevious(new_p)
 
 
 def fix_json_escapes(text: str) -> str:
@@ -248,11 +270,11 @@ def process_docx(input_path: str, output_path: str, gemini_api_key: str):
     if has_virtual:
         # Document uses line-breaks instead of paragraphs — build new doc from scratch
         out_doc = Document()
-        # Copy core properties (margins etc) from original if possible
         for p in paragraphs:
             lines = cleaned_map.get(p["id"], [p["text"]])
             for line in lines:
-                out_doc.add_paragraph(line)
+                new_para = out_doc.add_paragraph()
+                apply_text_to_para(new_para, line)
         out_doc.save(output_path)
         logger.info(f"Virtual-paragraph doc: wrote {len(paragraphs)} lines as real paragraphs")
         return
@@ -268,13 +290,13 @@ def process_docx(input_path: str, output_path: str, gemini_api_key: str):
         if len(new_paragraphs) == 1:
             new_text = new_paragraphs[0]
             if new_text != p["text"]:
-                set_para_text(p["para"], new_text)
+                apply_text_to_para(p["para"], new_text)
                 changed += 1
         else:
             headers = new_paragraphs[:-1]
             spec_text = new_paragraphs[-1]
-            insert_paragraphs_before(p["para"], headers)
-            set_para_text(p["para"], spec_text)
+            insert_paragraphs_before(p["para"], headers, doc)
+            apply_text_to_para(p["para"], spec_text)
             inserted += len(headers)
             changed += 1
 
