@@ -80,7 +80,8 @@ def collect_paragraphs(doc: Document) -> list[dict]:
         text = para.text.strip()
         if not text:
             continue
-        # Pre-process ranges before chunking so splits don't break "не менее X, но не более Y"
+        # Pre-process before chunking
+        text = fix_latin_chars(text)
         text = preprocess_ranges(text)
         if len(text) > CHUNK_SIZE:
             # Try line-break split first
@@ -151,6 +152,87 @@ def insert_paragraphs_before(para: Paragraph, texts: list[str], doc: Document):
         else:
             new_p = make_paragraph_element(text)
             ref_elem.addprevious(new_p)
+
+
+_LATIN_TO_CYR = {
+    'a': 'а', 'A': 'А', 'e': 'е', 'E': 'Е', 'o': 'о', 'O': 'О',
+    'p': 'р', 'P': 'Р', 'c': 'с', 'C': 'С', 'x': 'х', 'X': 'Х',
+    'y': 'у', 'Y': 'У', 'B': 'В', 'H': 'Н', 'M': 'М', 'T': 'Т',
+    'K': 'К', 'u': 'и', 'l': 'л',
+}
+
+
+def fix_latin_chars(text: str) -> str:
+    """Replace Latin lookalikes with Cyrillic only in mixed-script words."""
+    def fix_word(m):
+        word = m.group()
+        if re.search(r'[а-яёА-ЯЁ]', word) and re.search(r'[a-zA-Z]', word):
+            return ''.join(_LATIN_TO_CYR.get(ch, ch) for ch in word)
+        return word
+    return re.sub(r'\S+', fix_word, text)
+
+
+_STOP_PATTERNS = [
+    r'\bдолжн[аоы]?\s+быть\b',
+    r'\bдолжен\s+быть\b',
+    r'\bдолжн[аоы]?\b',
+    r'\bдолжен\b',
+    r'\bне\s+менее\s+чем\b',
+    r'\bне\s+более\s+чем\b',
+    r'\bне\s+менее\b',
+    r'\bне\s+более\b',
+    r'\bне\s+(?:хуже|ниже|выше|меньше|больше)(?:\s+чем)?\b',
+    r'\bнеменее\b',
+    r'\bминимум\b',
+    r'\bмаксимум\b',
+    r'\bпримерно\b',
+    r'\bориентировочно\b',
+    r'\bприблизительно\b',
+    r'\bоколо\b',
+    r'\bв\s+среднем\b',
+    r'\bгде-то\b',
+    r'\bна\s+примере\b',
+]
+
+
+def postprocess_text(text: str) -> str:
+    """Post-process after Gemini: более/менее → ±1, remove leftover stop words."""
+    # Step 1: remove "не + qualifier" phrases first → leaves the number intact
+    text = re.sub(
+        r'\bне\s+(?:более|менее|больше|меньше|выше|ниже|хуже|лучше)(?:\s+чем)?\s+',
+        '', text, flags=re.IGNORECASE
+    )
+
+    # Step 2: bare "более/выше/больше X" → X+1
+    def bolee(m):
+        try:
+            val = float(m.group(1).replace(',', '.'))
+            unit = m.group(2) or ''
+            return str(int(val) + 1) + (' ' if unit else '') + unit
+        except ValueError:
+            return m.group(0)
+    text = re.sub(r'\b(?:более|выше|больше)\s+([\d,\.]+)\s*([^\s,;\.\[]{0,8})',
+                  bolee, text, flags=re.IGNORECASE)
+
+    # Step 3: bare "менее/ниже/меньше X" → X-1
+    def menee(m):
+        try:
+            val = float(m.group(1).replace(',', '.'))
+            unit = m.group(2) or ''
+            return str(int(val) - 1) + (' ' if unit else '') + unit
+        except ValueError:
+            return m.group(0)
+    text = re.sub(r'\b(?:менее|ниже|меньше)\s+([\d,\.]+)\s*([^\s,;\.\[]{0,8})',
+                  menee, text, flags=re.IGNORECASE)
+
+    # Step 4: remove remaining stop words
+    for pattern in _STOP_PATTERNS:
+        text = re.sub(pattern, '', text, flags=re.IGNORECASE)
+
+    # Cleanup artifacts
+    text = re.sub(r'\s{2,}', ' ', text)
+    text = re.sub(r'\s+([,;:\.])', r'\1', text)
+    return text.strip()
 
 
 def preprocess_ranges(text: str) -> str:
@@ -251,9 +333,8 @@ def call_gemini(client: genai.Client, batch: list[dict]) -> dict[int, list[str]]
     for item in cleaned:
         paragraphs = item.get("paragraphs")
         if paragraphs is None:
-            # Fallback: old format with "text" key
             paragraphs = [item.get("text", "")]
-        result[item["id"]] = paragraphs
+        result[item["id"]] = [postprocess_text(p) for p in paragraphs]
     return result
 
 
