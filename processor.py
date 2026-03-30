@@ -192,18 +192,19 @@ _STOP_PATTERNS = [
     r'\bв\s+среднем\b',
     r'\bгде-то\b',
     r'\bна\s+примере\b',
+    r'\bнапример\b',
 ]
 
 
 def postprocess_text(text: str) -> str:
     """Post-process after Gemini: более/менее → ±1, remove leftover stop words."""
-    # Step 1: remove "не + qualifier" phrases first → leaves the number intact
+    # Step 1: remove "не + qualifier" → keep the number
     text = re.sub(
         r'\bне\s+(?:более|менее|больше|меньше|выше|ниже|хуже|лучше)(?:\s+чем)?\s+',
         '', text, flags=re.IGNORECASE
     )
 
-    # Step 2: bare "более/выше/больше X" → X+1
+    # Step 2: "более/выше/больше/старше X" → X+1
     def bolee(m):
         try:
             val = float(m.group(1).replace(',', '.'))
@@ -211,10 +212,10 @@ def postprocess_text(text: str) -> str:
             return str(int(val) + 1) + (' ' if unit else '') + unit
         except ValueError:
             return m.group(0)
-    text = re.sub(r'\b(?:более|выше|больше)\s+([\d,\.]+)\s*([^\s,;\.\[]{0,8})',
+    text = re.sub(r'\b(?:более|выше|больше|старше)\s+([\d,\.]+)\s*([^\s,;\.\[]{0,8})',
                   bolee, text, flags=re.IGNORECASE)
 
-    # Step 3: bare "менее/ниже/меньше X" → X-1
+    # Step 3: "менее/ниже/меньше/младше/хуже X" → X-1
     def menee(m):
         try:
             val = float(m.group(1).replace(',', '.'))
@@ -222,10 +223,16 @@ def postprocess_text(text: str) -> str:
             return str(int(val) - 1) + (' ' if unit else '') + unit
         except ValueError:
             return m.group(0)
-    text = re.sub(r'\b(?:менее|ниже|меньше)\s+([\d,\.]+)\s*([^\s,;\.\[]{0,8})',
+    text = re.sub(r'\b(?:менее|ниже|меньше|младше|хуже)\s+([\d,\.]+)\s*([^\s,;\.\[]{0,8})',
                   menee, text, flags=re.IGNORECASE)
 
-    # Step 4: remove remaining stop words
+    # Step 4: "или" → "и"
+    text = re.sub(r'\bили\b', 'и', text, flags=re.IGNORECASE)
+
+    # Step 5: remove "±"
+    text = text.replace('±', '')
+
+    # Step 6: remove remaining stop words
     for pattern in _STOP_PATTERNS:
         text = re.sub(pattern, '', text, flags=re.IGNORECASE)
 
