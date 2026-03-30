@@ -193,11 +193,18 @@ _STOP_PATTERNS = [
     r'\bгде-то\b',
     r'\bна\s+примере\b',
     r'\bнапример\b',
+    r'\bможет\s+быть\b',
+    r'\bлибо\b',
+    r'\bне\s+превышать\b',
+    r'\bне\s+превышает\b',
 ]
 
 
 def postprocess_text(text: str) -> str:
     """Post-process after Gemini: более/менее → ±1, remove leftover stop words."""
+    # Step 0: "до X[unit]" (standalone, = не более X) → keep X
+    text = re.sub(r'\bдо\s+([\d,\.]+)', r'\1', text, flags=re.IGNORECASE)
+
     # Step 1: remove "не + qualifier" → keep the number
     text = re.sub(
         r'\bне\s+(?:более|менее|больше|меньше|выше|ниже|хуже|лучше)(?:\s+чем)?\s+',
@@ -226,13 +233,41 @@ def postprocess_text(text: str) -> str:
     text = re.sub(r'\b(?:менее|ниже|меньше|младше|хуже)\s+([\d,\.]+)\s*([^\s,;\.\[]{0,8})',
                   menee, text, flags=re.IGNORECASE)
 
-    # Step 4: "или" → "и"
+    # Step 4: символы сравнения → числа ±1
+    # "> X" или "> X" → X+1
+    def gt(m):
+        try:
+            val = float(m.group(1).replace(',', '.'))
+            unit = m.group(2) or ''
+            return str(int(val) + 1) + (' ' if unit else '') + unit
+        except ValueError:
+            return m.group(0)
+    text = re.sub(r'[>]\s*([\d,\.]+)\s*([^\s,;\.\[]{0,8})', gt, text)
+
+    # "< X" → X-1
+    def lt(m):
+        try:
+            val = float(m.group(1).replace(',', '.'))
+            unit = m.group(2) or ''
+            return str(int(val) - 1) + (' ' if unit else '') + unit
+        except ValueError:
+            return m.group(0)
+    text = re.sub(r'[<]\s*([\d,\.]+)\s*([^\s,;\.\[]{0,8})', lt, text)
+
+    # ">= X" или "≥ X" → оставить X (убрать символ)
+    text = re.sub(r'[≥]\s*', '', text)
+    text = re.sub(r'>=\s*', '', text)
+    # "<= X" или "≤ X" → оставить X
+    text = re.sub(r'[≤]\s*', '', text)
+    text = re.sub(r'<=\s*', '', text)
+
+    # Step 5: "или" → "и"
     text = re.sub(r'\bили\b', 'и', text, flags=re.IGNORECASE)
 
-    # Step 5: remove "±"
+    # Step 6: remove ±
     text = text.replace('±', '')
 
-    # Step 6: remove remaining stop words
+    # Step 7: remove remaining stop words
     for pattern in _STOP_PATTERNS:
         text = re.sub(pattern, '', text, flags=re.IGNORECASE)
 
