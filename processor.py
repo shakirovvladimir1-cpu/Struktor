@@ -211,26 +211,32 @@ def postprocess_text(text: str) -> str:
         '', text, flags=re.IGNORECASE
     )
 
-    # Step 2: "более/выше/больше/старше X" → X+1
+    # Step 2: "более/выше/больше/старше/свыше X" → X + step
     def bolee(m):
         try:
             val = float(m.group(1).replace(',', '.'))
+            step = 0.1 if val <= 1 else 1
+            new_val = round(val + step, 10)
+            result = str(int(new_val)) if new_val == int(new_val) else str(round(new_val, 4)).rstrip('0').rstrip('.')
             unit = m.group(2) or ''
-            return str(int(val) + 1) + (' ' if unit else '') + unit
+            return result + (' ' if unit else '') + unit
         except ValueError:
             return m.group(0)
-    text = re.sub(r'\b(?:более|выше|больше|старше)\s+([\d,\.]+)\s*([^\s,;\.\[]{0,8})',
+    text = re.sub(r'\b(?:более|выше|больше|старше|свыше)\s+([\d,\.]+)\s*([^\s,;\.\[]{0,8})',
                   bolee, text, flags=re.IGNORECASE)
 
-    # Step 3: "менее/ниже/меньше/младше/хуже X" → X-1
+    # Step 3: "менее/ниже/меньше/младше/хуже/тоньше X" → X - step
     def menee(m):
         try:
             val = float(m.group(1).replace(',', '.'))
+            step = 0.1 if val <= 1 else 1
+            new_val = round(val - step, 10)
+            result = str(int(new_val)) if new_val == int(new_val) else str(round(new_val, 4)).rstrip('0').rstrip('.')
             unit = m.group(2) or ''
-            return str(int(val) - 1) + (' ' if unit else '') + unit
+            return result + (' ' if unit else '') + unit
         except ValueError:
             return m.group(0)
-    text = re.sub(r'\b(?:менее|ниже|меньше|младше|хуже)\s+([\d,\.]+)\s*([^\s,;\.\[]{0,8})',
+    text = re.sub(r'\b(?:менее|ниже|меньше|младше|хуже|тоньше)\s+([\d,\.]+)\s*([^\s,;\.\[]{0,8})',
                   menee, text, flags=re.IGNORECASE)
 
     # Step 4: символы сравнения → числа ±1
