@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import time
 
 from docx import Document
 from docx.text.paragraph import Paragraph
@@ -372,14 +373,22 @@ def call_gemini(client: genai.Client, batch: list[dict]) -> dict[int, list[str]]
         + "\n\nВходные данные:\n"
         + json.dumps(input_data, ensure_ascii=False, indent=2)
     )
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-        ),
-    )
-    cleaned = parse_gemini_response(response.text)
+    for attempt in range(1, 4):
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+            ),
+        )
+        try:
+            cleaned = parse_gemini_response(response.text)
+            break
+        except json.JSONDecodeError as e:
+            if attempt == 3:
+                raise
+            logger.warning(f"JSON parse error (attempt {attempt}/3): {e} — retrying...")
+            time.sleep(1)
 
     result = {}
     for item in cleaned:
