@@ -98,7 +98,10 @@ def collect_paragraphs(doc: Document) -> list[dict]:
                 continue
         raw.append({"para": para, "text": text, "virtual": False})
 
-    return [{"id": i, **r} for i, r in enumerate(raw)]
+    result = [{"id": i, **r} for i, r in enumerate(raw)]
+    red_count = sum(1 for r in result if '[[RED:' in r['text'])
+    logger.info(f"Ranges found (red markers): {red_count}")
+    return result
 
 
 RED_MARKER = re.compile(r'\[\[RED:(.*?)\]\]')
